@@ -132,9 +132,9 @@ GitHub apps access to the repository if it is not listed.
 
 1. Create a Docker Web Service from the **new repository**. Use root `Dockerfile`
    and health-check path `/ready`. `render.yaml` supplies the same settings.
-2. The template selects an always-on **Starter** instance, which costs money.
-   Review the current plan price before creating the service. No service has
-   been activated by this extraction.
+2. The template selects **Free** compute in Singapore. The API can sleep while
+   idle and take time to wake; Atlas still retains all records. Allow a 120-second
+   client deadline and reuse the original operation key if a reply times out.
 3. Set `BANKING_MONGODB_URI`, `BANKING_MONGODB_DB` and `BANKING_API_TOKEN` in
    Render's secret settings. Never add secrets as Docker build arguments.
 4. Allow the service's documented outbound addresses in Atlas network access.
