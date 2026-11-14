@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: nexa-banking-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /ready
+    envVars:
+      - key: BANKING_MONGODB_URI
+        sync: false
+      - key: BANKING_MONGODB_DB
+        value: nexa_banking
+      - key: BANKING_API_TOKEN
+        sync: false
+      - key: DD_TRACE_ENABLED
+        value: "false"
+      - key: DD_SERVICE
+        value: nexa-banking-api
+      - key: DD_ENV
+        value: training

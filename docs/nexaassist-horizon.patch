@@ -1,0 +1,253 @@
+diff --git a/app/core/config.py b/app/core/config.py
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+
+ from functools import lru_cache
++from pathlib import Path
+ from typing import Literal
+
+ from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
+@@ -197,12 +198,15 @@
+     agent_run_timeout_seconds: float = Field(default=180, gt=0, le=600)
+     banking_transport: Literal["http", "mcp"] = "mcp"
+     banking_mcp_transport: Literal["stdio", "http"] = "stdio"
++    banking_mcp_auth_mode: Literal["token", "oauth"] = "token"
+     banking_mcp_url: HttpUrl = HttpUrl("http://127.0.0.1:9002/mcp")
+     banking_mcp_port: int = Field(default=9002, ge=1024, le=65535)
+     banking_mcp_token: SecretStr | None = Field(default=None, min_length=32)
+     banking_mcp_signing_key: SecretStr | None = Field(default=None, min_length=32)
+     banking_mcp_customer_ids: frozenset[str] = Field(default_factory=frozenset)
+     banking_mcp_write_grant: SecretStr | None = Field(default=None, exclude=True)
++    banking_mcp_oauth_directory: Path = Path.home() / ".local/share/nexa-banking-mcp/oauth"
++    banking_mcp_oauth_storage_key: SecretStr | None = None
+     banking_base_url: HttpUrl = HttpUrl("http://127.0.0.1:8080/")
+     banking_api_token: SecretStr | None = Field(default=None, min_length=1)
+     agent_validation_token: SecretStr | None = Field(default=None, min_length=32)
+@@ -237,7 +241,13 @@
+         return self
+
+     @field_validator(
+-        "banking_api_token", "agent_validation_token", "banking_mcp_write_grant", mode="before"
++        "banking_api_token",
++        "agent_validation_token",
++        "banking_mcp_write_grant",
++        "banking_mcp_token",
++        "banking_mcp_signing_key",
++        "banking_mcp_oauth_storage_key",
++        mode="before",
+     )
+     @classmethod
+     def empty_validation_token(cls, value: object) -> object:
+diff --git a/app/mcp/banking_http.py b/app/mcp/banking_http.py
+--- a/app/mcp/banking_http.py
++++ b/app/mcp/banking_http.py
+@@ -32,9 +32,10 @@
+ def signed_headers(
+     settings: AgentSettings, access: ValidationAccess, grant: str | None
+ ) -> dict[str, str]:
+-    if settings.banking_mcp_token is None or settings.banking_mcp_signing_key is None:
++    if settings.banking_mcp_signing_key is None or (
++        settings.banking_mcp_auth_mode == "token" and settings.banking_mcp_token is None
++    ):
+         raise ValueError("HTTP MCP credentials are required")
+-    secret = settings.banking_mcp_token.get_secret_value()
+     context = BankingHTTPContext(
+         access=access,
+         expires_at=int(time.time()) + 330,
+@@ -47,11 +48,36 @@
+         payload.encode(),
+         hashlib.sha256,
+     ).hexdigest()
+-    return {
+-        "Authorization": "Bearer " + secret,
++    headers = {
+         "X-Nexa-Banking-Context": payload,
+         "X-Nexa-Banking-Signature": signature,
+     }
++    if settings.banking_mcp_auth_mode == "token":
++        assert settings.banking_mcp_token is not None
++        headers["Authorization"] = "Bearer " + settings.banking_mcp_token.get_secret_value()
++    return headers
++
++
++def verify_signed_context(
++    settings: AgentSettings, payload: str, signature: str
++) -> BankingHTTPContext:
++    if settings.banking_mcp_signing_key is None or len(payload) > 16384:
++        raise ValueError("Invalid signed context")
++    expected = hmac.new(
++        settings.banking_mcp_signing_key.get_secret_value().encode(),
++        payload.encode(),
++        hashlib.sha256,
++    ).hexdigest()
++    if not hmac.compare_digest(expected.encode(), signature.encode()):
++        raise ValueError("Invalid context signature")
++    context = BankingHTTPContext.model_validate_json(payload, strict=True)
++    now = int(time.time())
++    if (
++        context.backend_identity != backend_identity(settings)
++        or not now <= context.expires_at <= now + 330
++    ):
++        raise ValueError("Expired context or changed backend identity")
++    return context
+
+
+ class BankingHTTPAuth:
+@@ -90,21 +116,9 @@
+                     backend_identity=backend_identity(self.settings),
+                 )
+             else:
+-                if len(payload) > 16384:
+-                    raise ValueError("Oversized context")
+-                expected = hmac.new(
+-                    self.signing_key.encode(), payload.encode(), hashlib.sha256
+-                ).hexdigest()
+-                if not hmac.compare_digest(
+-                    expected.encode(), headers.get("x-nexa-banking-signature", "").encode()
+-                ):
+-                    raise ValueError("Invalid context signature")
+-                context = BankingHTTPContext.model_validate_json(payload, strict=True)
+-                if context.backend_identity != backend_identity(self.settings):
+-                    raise ValueError("Banking backend identity changed")
+-                now = int(time.time())
+-                if not now <= context.expires_at <= now + 330:
+-                    raise ValueError("Expired context")
++                context = verify_signed_context(
++                    self.settings, payload, headers.get("x-nexa-banking-signature", "")
++                )
+             scope.setdefault("state", {})["banking_context"] = context
+         except ValueError:
+             await JSONResponse({"detail": "MCP request context rejected"}, status_code=403)(
+diff --git a/app/services/banking_mcp.py b/app/services/banking_mcp.py
+--- a/app/services/banking_mcp.py
++++ b/app/services/banking_mcp.py
+@@ -10,9 +10,17 @@
+
+ import httpx
+ import httpx2
++from cryptography.fernet import Fernet
+ from fastmcp import Client
++from fastmcp.client.auth import OAuth
+ from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+ from fastmcp.exceptions import ToolError
++from key_value.aio.stores.filetree import (
++    FileTreeStore,
++    FileTreeV1CollectionSanitizationStrategy,
++    FileTreeV1KeySanitizationStrategy,
++)
++from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+ from mcp.shared.exceptions import MCPError
+ from pydantic import BaseModel
+
+@@ -32,6 +40,31 @@
+     write_grant,
+ )
+ from app.models.validation import ValidationAccess
++
++
++class BankingOAuth(OAuth):
++    async def redirect_handler(self, authorization_url: str) -> None:
++        raise RuntimeError("Authorize Horizon first: python -m app.mcp.horizon_login")
++
++
++def banking_oauth(settings: AgentSettings, *, interactive: bool = False) -> OAuth:
++    if settings.banking_mcp_oauth_storage_key is None:
++        raise ValueError("OAuth token encryption key is required")
++    directory = settings.banking_mcp_oauth_directory.expanduser()
++    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
++    directory.chmod(0o700)
++    storage = FileTreeStore(
++        data_directory=directory,
++        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(directory),
++        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(directory),
++    )
++    return (OAuth if interactive else BankingOAuth)(
++        httpx_client_factory=mcp_http_client,
++        token_storage=FernetEncryptionWrapper(
++            key_value=storage,
++            fernet=Fernet(settings.banking_mcp_oauth_storage_key.get_secret_value()),
++        ),
++    )
+
+
+ def mcp_http_client(
+@@ -133,6 +166,11 @@
+             tool, arguments = self.operation(request)
+             transport: StdioTransport | StreamableHttpTransport
+             if self.settings.banking_mcp_transport == "http":
++                if (
++                    self.settings.banking_mcp_auth_mode == "oauth"
++                    and self.settings.banking_mcp_url.scheme != "https"
++                ):
++                    raise ValueError("Hosted OAuth requires HTTPS")
+                 transport = StreamableHttpTransport(
+                     url=str(self.settings.banking_mcp_url),
+                     httpx_client_factory=mcp_http_client,
+@@ -141,6 +179,9 @@
+                         self.access,
+                         write_grant(tool, arguments) if request.method == "POST" else None,
+                     ),
++                    auth=banking_oauth(self.settings)
++                    if self.settings.banking_mcp_auth_mode == "oauth"
++                    else None,
+                 )
+             else:
+                 transport = StdioTransport(
+diff --git a/app/services/agent_runs.py b/app/services/agent_runs.py
+--- a/app/services/agent_runs.py
++++ b/app/services/agent_runs.py
+@@ -104,6 +104,8 @@
+             value += "\ntransport=mcp"
+             if self.config.banking_mcp_transport == "http":
+                 value += "\nhttp=" + str(self.config.banking_mcp_url)
++                if self.config.banking_mcp_auth_mode == "oauth":
++                    value += "\nauth=oauth"
+                 if self.config.banking_mcp_token is not None:
+                     value += "\n" + self.config.banking_mcp_token.get_secret_value()
+                 if self.config.banking_mcp_signing_key is not None:
+diff --git a/app/mcp/horizon_login.py b/app/mcp/horizon_login.py
+new file mode 100644
+--- /dev/null
++++ b/app/mcp/horizon_login.py
+@@ -0,0 +1,27 @@
++"""Authorize the local Agent operator with Horizon before serving requests."""
++
++from __future__ import annotations
++
++import asyncio
++
++from fastmcp import Client
++
++from app.core.config import get_agent_settings
++from app.models.banking_mcp import BANKING_TOOLS
++from app.services.banking_mcp import banking_oauth
++
++
++async def login() -> None:
++    config = get_agent_settings()
++    if config.banking_mcp_url.scheme != "https":
++        raise ValueError("Horizon login requires an HTTPS MCP URL")
++    async with Client(
++        str(config.banking_mcp_url), auth=banking_oauth(config, interactive=True)
++    ) as client:
++        tools = await client.list_tools()
++        if {tool.name for tool in tools} != BANKING_TOOLS:
++            raise ValueError("Unexpected banking MCP deployment")
++
++
++if __name__ == "__main__":
++    asyncio.run(login())
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,6 +9,8 @@
+     "fastmcp>=4.1.6",
+     "httpx",
+     "httpx2",
++    "cryptography",
++    "py-key-value-aio",
+     "langchain-core",
+     "langchain-mongodb",
+     "langchain-openai",
