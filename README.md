@@ -12,6 +12,26 @@ flowchart LR
     R --> M[("MongoDB Atlas\ncases, notes, escalations, receipts, retry records")]
 ```
 
+## Deployed training services
+
+- Banking MCP: <https://nexa-banking-mcp.fastmcp.app/mcp> (OAuth required).
+- Banking API: <https://nexa-banking-api.onrender.com/>; readiness at `/ready`.
+- API explorer: <https://nexa-banking-api.onrender.com/docs>.
+
+Verified on 14 November 2026 against the hosted services: all twelve tools,
+signed-header forwarding, customer isolation, invalid/expired scope rejection,
+exact write grants, case creation/read/note/escalation and unchanged replay
+results. Ten real-model, real-policy NexaAssist owner/reviewer journeys passed in
+an isolated checkout: five approved submissions and five rejections without
+banking writes. Atlas retained five synthetic receipts and one case with one
+note and an escalation. Existing local NexaAssist endpoints remain unchanged.
+
+Render uses free compute and can cold-start. Datadog delivery is not configured;
+tracing is disabled. The existing Atlas project credential was reused with the
+separate `nexa_banking` database; a dedicated least-privilege database user remains
+recommended. Provider consoles enforce authentication; this is synthetic training
+data, with no real financial execution.
+
 ## Code and ownership
 
 | Path | Responsibility |
@@ -165,7 +185,7 @@ Keep Gateway authentication **enabled**. Configure these private values:
 | `BANKING_BASE_URL` | Render HTTPS base URL, including a trailing `/` |
 | `BANKING_API_TOKEN` | Same backend token as Render |
 | `BANKING_MCP_SIGNING_KEY` | Independent application signing secret, shared only with the trusted Agent |
-| `AGENT_HTTP_TIMEOUT_SECONDS` | HTTP deadline, e.g. `60` |
+| `AGENT_HTTP_TIMEOUT_SECONDS` | HTTP deadline, e.g. `120` for free Render |
 | `DD_TRACE_ENABLED` | `false` until Datadog is configured |
 
 Horizon needs no Atlas URI, static MCP bearer token, customer allowlist, write
@@ -177,7 +197,8 @@ CLI `main()` is deliberately not part of the hosted startup path.
 project, loads the exported object, enforces OAuth, and forwards both
 `X-Nexa-Banking-Context` and `X-Nexa-Banking-Signature`. If any gate fails, stop the
 rollout; do not downgrade Python or disable application authorization to deploy.
-These provider-side checks have not been completed locally.
+The initial hosted deployment passed these checks through actual OAuth and tool
+calls. Recheck them after runtime, gateway or authentication configuration changes.
 
 Horizon Inspector connections can authenticate using OAuth and discover tools.
 Calling a tool also requires signed application context. Ordinary OAuth alone
