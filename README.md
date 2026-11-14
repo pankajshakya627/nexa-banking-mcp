@@ -260,6 +260,8 @@ make check-task
 make check-full
 # Explicit live test, with BANKING_MONGODB_URI configured in .env:
 make test-atlas
+# Real HTTP MCP -> Docker backend -> Atlas, all twelve tools:
+make test-live
 docker build -t nexa-banking-api:local .
 ```
 
@@ -267,3 +269,10 @@ The Atlas test creates a new `banking_smoke_<random>` database, verifies restart
 persistence, concurrent duplicate claims, changed-body rejection, rollback and
 commit-then-lost-reply recovery, then drops only that database. It never resets the
 configured banking database. Local test doubles cannot prove transaction safety.
+
+The explicit `test-live` target also requires Docker and the locally built
+`nexa-banking-api:local` image. It tests all twelve tools through real HTTP MCP,
+all five service-request types, case notes/escalation, cross-customer denials,
+missing/exact write grants, concurrent duplicates, and receipt replay after a
+container restart. It uses trusted synthetic test grants; NexaAssist's separate
+owner/reviewer approval must also pass before switching the normal connection.

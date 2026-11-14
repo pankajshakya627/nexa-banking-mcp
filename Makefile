@@ -1,6 +1,6 @@
 UV = uv run --locked --no-sync
 
-.PHONY: check-fast check-task check-full test-atlas
+.PHONY: check-fast check-task check-full test-atlas test-live
 check-fast:
 	$(UV) ruff check app tests
 	$(UV) ruff format --check app tests
@@ -15,3 +15,6 @@ check-full: check-task
 
 test-atlas:
 	$(UV) pytest tests/live_atlas.py -q --tb=short
+
+test-live:
+	$(UV) pytest tests/live_atlas.py tests/live_workflows.py -q --tb=short
