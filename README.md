@@ -116,17 +116,17 @@ there; this repository contains only banking.
 
 ## 3. Publish the independent repository
 
-This is a fresh Git repository, with no original Git history, `.env`, virtual
-environment or credentials. Push it to a new repository, for example:
+The standalone source is published at
+[pankajshakya627/nexa-banking-mcp](https://github.com/pankajshakya627/nexa-banking-mcp)
+on `main`. It contains no original Git history, `.env`, virtual environment or
+credentials. Future updates can be published with:
 
 ```sh
-gh repo create nexa-banking-mcp --private --source=. --remote=origin --push
+git push origin main
 ```
 
-Run that yourself only after reviewing the files and Git status. Grant the
-Horizon and Render GitHub apps access to the new repository if it is not listed.
-Use the branch containing this extraction (`codex/horizon-banking` initially),
-or make your preferred deployment branch after publication.
+Select this repository and its `main` branch in Horizon and Render. Grant their
+GitHub apps access to the repository if it is not listed.
 
 ## 4. Deploy the banking API on Render first
 
